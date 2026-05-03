@@ -3,7 +3,7 @@ import { auth, db, storage } from "../firebase";
 import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { doc, setDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 
 export default function Register() {
   const [email, setEmail] = useState('');
@@ -11,34 +11,45 @@ export default function Register() {
   const [displayName, setDisplayName] = useState('');
   const [avatar, setAvatar] = useState(null);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false); // Added for UX
   const navigate = useNavigate();
 
   const handleRegister = async (e) => {
     e.preventDefault();
+    setLoading(true);
+    setError("");
+
     try {
+      // 1. Create User in Firebase Auth
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
-      let photoURL = '';
+      // 2. Handle Profile Picture
+      let photoURL = "https://ui-avatars.com/api/?name=" + displayName; // Professional fallback
+      
       if (avatar) {
-        const storageRef = ref(storage, `avatars/${user.uid}_${avatar.name}`);
+        const storageRef = ref(storage, `avatars/${user.uid}`);
         await uploadBytes(storageRef, avatar);
         photoURL = await getDownloadURL(storageRef);
-        await updateProfile(user, { displayName, photoURL });
-      } else {
-        await updateProfile(user, { displayName });
       }
 
+      // 3. Update the Auth Profile
+      await updateProfile(user, { displayName, photoURL });
+
+      // 4. THE FIX: Create Firestore Document
+      // We use .toLowerCase() so searching is case-insensitive later
       await setDoc(doc(db, "users", user.uid), {
         uid: user.uid,
-        email,
         displayName,
+        email: email.toLowerCase(), 
         photoURL
       });
 
       navigate('/chat');
     } catch (err) {
       setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -50,13 +61,15 @@ export default function Register() {
         <input required type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
         <input required type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
         <label className="file-label">
-          Avatar (optional)
-          <input type="file" accept="image/*" onChange={e=>setAvatar(e.target.files[0])} />
+          {avatar ? "✅ Image Selected" : "Upload Avatar (Optional)"}
+          <input type="file" style={{display: "none"}} accept="image/*" onChange={e=>setAvatar(e.target.files[0])} />
         </label>
-        <button type="submit">Sign Up</button>
+        <button type="submit" disabled={loading}>
+          {loading ? "Creating Account..." : "Sign Up"}
+        </button>
         {error && <p className="error">{error}</p>}
-        <div id="recaptcha-container"></div>
       </form>
+      <p className="auth-link">Already have an account? <Link to="/login">Login</Link></p>
     </div>
   );
 }

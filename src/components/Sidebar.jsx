@@ -6,28 +6,29 @@ import {
   where, 
   getDocs, 
   onSnapshot, 
-  addDoc, 
-  serverTimestamp,
+  setDoc, // Changed from addDoc to setDoc for predictable IDs
   doc,
-  updateDoc
+  orderBy,
+  serverTimestamp
 } from 'firebase/firestore';
-import { FiLogOut, FiSearch, FiMessageSquare, FiSettings, FiUserPlus, FiClock } from 'react-icons/fi';
+import { FiLogOut, FiSearch, FiMessageSquare, FiSettings, FiUserPlus, FiClock, FiX } from 'react-icons/fi';
 
 const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [foundUser, setFoundUser] = useState(null);
-  const [chatList, setChatList] = useState([]); // List of active friends/chats
+  const [chatList, setChatList] = useState([]);
   const [err, setErr] = useState(false);
-  const [requestStatus, setRequestStatus] = useState(null); // 'pending', 'friends', or null
+  const [requestStatus, setRequestStatus] = useState(null); 
+  const [isSearching, setIsSearching] = useState(false);
 
-  // 1. Fetch Active Chats/Friends
+  // 1. Fetch Active Chats (Sorted by latest activity)
   useEffect(() => {
     if (!currentUser.uid) return;
 
-    // Listen for any chat where the current user is a participant
     const q = query(
       collection(db, "chats"),
-      where("participants", "array-contains", currentUser.uid)
+      where("participants", "array-contains", currentUser.uid),
+      orderBy("lastUpdatedAt", "desc") // Sorts most recent chats to the top
     );
 
     const unsub = onSnapshot(q, (snapshot) => {
@@ -41,17 +42,23 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
     return () => unsub();
   }, [currentUser.uid]);
 
-  // 2. Search Logic with Friendship Check
+  // 2. Updated Search Logic
   const handleSearch = async (e) => {
     e.preventDefault();
     setErr(false);
     setFoundUser(null);
     setRequestStatus(null);
+    setIsSearching(true);
     
-    const term = searchQuery.trim();
-    if (!term || term === currentUser.email) return;
+    // Normalize input to lowercase to match our new registration logic
+    const term = searchQuery.trim().toLowerCase();
+    if (!term || term === currentUser.email.toLowerCase()) {
+      setIsSearching(false);
+      return;
+    }
 
     try {
+      // Search by Email
       const emailQuery = query(collection(db, "users"), where("email", "==", term));
       const emailSnap = await getDocs(emailQuery);
 
@@ -59,6 +66,7 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
       if (!emailSnap.empty) {
         userDoc = emailSnap.docs[0].data();
       } else {
+        // Fallback: Search by Phone
         const formattedPhone = term.startsWith('+') ? term : "+" + term;
         const phoneQuery = query(collection(db, "users"), where("phone", "==", formattedPhone));
         const phoneSnap = await getDocs(phoneQuery);
@@ -67,26 +75,31 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
 
       if (userDoc) {
         setFoundUser(userDoc);
-        // Check if a chat already exists between these two
+        
+        // Use the consistent combinedId logic
         const combinedId = currentUser.uid > userDoc.uid 
           ? currentUser.uid + "_" + userDoc.uid 
           : userDoc.uid + "_" + currentUser.uid;
         
-        const chatRef = query(collection(db, "chats"), where("chatId", "==", combinedId));
-        const chatSnap = await getDocs(chatRef);
+        // Check if a chat/request already exists
+        const chatSnap = await getDocs(query(collection(db, "chats"), where("chatId", "==", combinedId)));
         
         if (!chatSnap.empty) {
-          setRequestStatus('friends');
+          const chatData = chatSnap.docs[0].data();
+          setRequestStatus(chatData.status); // 'pending' or 'accepted'
         }
       } else {
         setErr(true);
       }
     } catch (error) {
+      console.error("Search Error:", error);
       setErr(true);
+    } finally {
+      setIsSearching(false);
     }
   };
 
-  // 3. Send Friend Request (Creates the Chat document)
+  // 3. Handle Send Request
   const handleSendRequest = async () => {
     if (!foundUser) return;
 
@@ -95,20 +108,29 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
       : foundUser.uid + "_" + currentUser.uid;
 
     try {
-      await addDoc(collection(db, "chats"), {
+      // Using setDoc with combinedId prevents duplicate chat documents
+      await setDoc(doc(db, "chats", combinedId), {
         chatId: combinedId,
         participants: [currentUser.uid, foundUser.uid],
         users: [
           { uid: currentUser.uid, displayName: currentUser.displayName, photoURL: currentUser.photoURL },
           { uid: foundUser.uid, displayName: foundUser.displayName, photoURL: foundUser.photoURL }
         ],
-        status: "pending", // You can use this to block messaging until accepted
-        createdAt: serverTimestamp()
+        status: "pending", 
+        createdAt: serverTimestamp(),
+        lastUpdatedAt: serverTimestamp(),
+        lastMessage: "Friend request sent"
       });
       setRequestStatus('pending');
     } catch (e) {
-      console.error(e);
+      console.error("Request Error:", e);
     }
+  };
+
+  const clearSearch = () => {
+    setFoundUser(null);
+    setSearchQuery("");
+    setErr(false);
   };
 
   return (
@@ -117,7 +139,7 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
         <h2>Chats</h2>
       </div>
 
-      {/* Search Section */}
+      {/* Search Input */}
       <div style={{ padding: '15px' }}>
         <form onSubmit={handleSearch} className="input-wrapper" style={{ padding: '5px 15px' }}>
           <input 
@@ -126,70 +148,72 @@ const Sidebar = ({ currentUser, handleLogout, onSelectUser, onShowSettings }) =>
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
-          <button type="submit" className="logout-btn" style={{ color: '#6366f1' }}>
-            <FiSearch size={18} />
-          </button>
+          {foundUser ? (
+             <FiX size={18} onClick={clearSearch} style={{ cursor: 'pointer', color: '#ef4444' }} />
+          ) : (
+            <button type="submit" className="logout-btn" style={{ color: '#6366f1' }}>
+              <FiSearch size={18} />
+            </button>
+          )}
         </form>
-        {err && <span className="error" style={{ display: 'block', marginTop: '10px' }}>No user found!</span>}
+        {err && <span className="error" style={{ display: 'block', marginTop: '10px', fontSize: '0.8rem' }}>No user found in Delhi/NCR directory.</span>}
       </div>
 
       {/* Search Result Display */}
       {foundUser && (
-        <div className="user-info" style={{ cursor: 'default', margin: '0 15px', border: '1px solid #6366f1' }}>
+        <div className="user-info search-result-box" style={{ margin: '0 15px', border: '1px solid #6366f1', background: '#1e293b' }}>
           <img src={foundUser.photoURL || `https://ui-avatars.com/api/?name=${foundUser.displayName}`} alt="user" />
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: '600' }}>{foundUser.displayName}</div>
             <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>
-              {requestStatus === 'friends' ? 'Already Friends' : 'Not in your list'}
+              {requestStatus === 'accepted' ? 'Already Friends' : requestStatus === 'pending' ? 'Request Pending' : 'New User'}
             </div>
           </div>
           
-          {requestStatus === 'friends' ? (
-            <button onClick={() => onSelectUser(foundUser)} className="send-btn" style={{ width: '35px', height: '35px' }}>
+          {requestStatus === 'accepted' ? (
+            <button onClick={() => { onSelectUser(foundUser); clearSearch(); }} className="send-btn">
               <FiMessageSquare size={16} />
             </button>
           ) : requestStatus === 'pending' ? (
-            <FiClock size={20} color="#94a3b8" title="Request Sent" />
+            <div title="Waiting for acceptance"><FiClock size={20} color="#f59e0b" /></div>
           ) : (
-            <button onClick={handleSendRequest} className="send-btn" style={{ width: '35px', height: '35px', background: '#22c55e' }}>
+            <button onClick={handleSendRequest} className="send-btn" style={{ background: '#22c55e' }}>
               <FiUserPlus size={16} />
             </button>
           )}
         </div>
       )}
 
-      {/* --- ACTIVE CHATS LIST --- */}
-      <div style={{ flex: 1, overflowY: 'auto', marginTop: '10px' }}>
-        <p style={{ padding: '0 20px', fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px' }}>Recent</p>
+      {/* Recent Chats List */}
+      <div style={{ flex: 1, overflowY: 'auto', marginTop: '10px' }} className="custom-scrollbar">
+        <p className="section-title" style={{ padding: '0 20px', fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase' }}>Recent Activity</p>
+        {chatList.length === 0 && <p style={{ padding: '20px', color: '#475569', fontSize: '0.85rem' }}>No active chats found.</p>}
         {chatList.map(chat => {
           const partner = chat.users.find(u => u.uid !== currentUser.uid);
           return (
-            <div key={chat.id} className="user-info" onClick={() => onSelectUser(partner)} style={{ cursor: 'pointer', background: 'transparent', margin: '5px 15px' }}>
+            <div key={chat.id} className="user-info chat-item" onClick={() => onSelectUser(partner)}>
               <img src={partner?.photoURL || `https://ui-avatars.com/api/?name=${partner?.displayName}`} alt="avatar" />
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: '500' }}>{partner?.displayName}</div>
-                <div style={{ fontSize: '0.8rem', color: '#64748b' }}>Click to chat</div>
+                <div style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {chat.lastMessage || "Tap to chat"}
+                </div>
               </div>
+              {chat.status === 'pending' && <span className="pending-tag">Pending</span>}
             </div>
           );
         })}
       </div>
 
-      {/* Current User Profile (Bottom) */}
-      <div className="user-info" style={{ marginTop: 'auto', borderTop: '1px solid #1e293b', borderRadius: '0', margin: '0', padding: '20px' }}>
+      {/* User Footer */}
+      <div className="sidebar-footer">
         <img src={currentUser?.photoURL || `https://ui-avatars.com/api/?name=${currentUser?.displayName}`} alt="me" />
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          <div style={{ fontWeight: '600', textOverflow: 'ellipsis', whiteSpace: 'nowrap', overflow: 'hidden' }}>
-            {currentUser?.displayName}
-          </div>
-          <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Online</div>
+          <div className="user-name-footer">{currentUser?.displayName}</div>
+          <div className="status-online">Active Now</div>
         </div>
-        <button onClick={onShowSettings} className="logout-btn" title="Settings" style={{ color: '#94a3b8' }}>
-          <FiSettings size={20} />
-        </button>
-        <button onClick={handleLogout} className="logout-btn" title="Logout">
-          <FiLogOut size={20} />
-        </button>
+        <button onClick={onShowSettings} className="footer-icon-btn"><FiSettings size={20} /></button>
+        <button onClick={handleLogout} className="footer-icon-btn logout-color"><FiLogOut size={20} /></button>
       </div>
     </div>
   );
